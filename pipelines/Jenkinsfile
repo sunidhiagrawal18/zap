@@ -11,7 +11,7 @@ pipeline {
         stage('Setup ZAP') {
             steps {
                 sh 'mkdir -p ${ZAP_DIR}'
-                sh 'wget -O zap.conf https://raw.githubusercontent.com/your-repo/zap.conf'
+                sh 'wget -O zap.conf https://github.com/sunidhiagrawal18/zap/blob/main/configs/zap.conf'
                 sh 'docker pull owasp/zap2docker-stable'
             }
         }
