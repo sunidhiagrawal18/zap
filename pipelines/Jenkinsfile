@@ -68,8 +68,10 @@ pipeline {
     }
     post {
         always {
-            sh 'docker stop zap || true'
-            sh 'docker rm zap || true'
+            node {  // ✅ Provides workspace context
+                sh 'docker stop zap || true'
+                sh 'docker rm zap || true'
+            }
         }
     }
 }
