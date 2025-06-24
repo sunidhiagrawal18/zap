@@ -2,9 +2,9 @@ pipeline {
     agent any
     
     environment {
-        ZAP_IMAGE = 'owasp/zap2docker-stable'  // Official ZAP image
+        // Use the official GitHub Container Registry image
+        ZAP_IMAGE = 'ghcr.io/zaproxy/zaproxy:stable'
         ZAP_URL = 'https://dcodept.unilever.com'
-        ZAP_AUTH_URL = 'https://dcodept.unilever.com/sso-dev/login'
         WORKSPACE_DIR = "${WORKSPACE}/zap-reports"
     }
     
@@ -13,53 +13,69 @@ pipeline {
             steps {
                 sh '''
                     mkdir -p ${WORKSPACE_DIR}
-                    chmod -R 777 ${WORKSPACE} || true  # Fix permission issues
+                    chmod -R 777 ${WORKSPACE} || true
                 '''
+                // Verify Docker access
+                sh 'docker logout || true'  // Clear any conflicting credentials
             }
         }
 
-        stage('Run Authenticated ZAP Scan') {
+        stage('Run ZAP Scan') {
+            environment {
+                // Load credentials securely (must be defined in Jenkins)
+                ZAP_USER = credentials('zap-username')
+                ZAP_PASS = credentials('zap-password')
+            }
             steps {
                 script {
-                    // Start ZAP in daemon mode with your configs
+                    // Cleanup old containers
+                    sh 'docker rm -f zap-scan || true'
+                    
+                    // Pull image first with error handling
                     sh '''
-                        docker rm -f zap-scan || true  # Cleanup old instances
-                        docker run -d --name zap-scan \
-                          -v ${WORKSPACE}:/zap/wrk:rw \
-                          -p 8080:8080 \
-                          -e ZAP_USER="${ZAP_USER}" \
-                          -e ZAP_PASS="${ZAP_PASS}" \
-                          ${ZAP_IMAGE} \
-                          zap.sh -daemon -host 0.0.0.0 -port 8080 \
-                          -config api.disablekey=true \
-                          -configfile /zap/wrk/zap.conf
+                        if ! docker pull ${ZAP_IMAGE}; then
+                            echo "Failed to pull ZAP image. Trying fallback..."
+                            docker pull ghcr.io/zaproxy/zaproxy:latest
+                        fi
                     '''
                     
-                    // Wait for ZAP to initialize
-                    sh 'sleep 30'
+                    // Run ZAP with proper volumes and configs
+                    sh """
+                        docker run -d --name zap-scan \\
+                          -v ${WORKSPACE}:/zap/wrk:rw \\
+                          -e ZAP_USER="${ZAP_USER}" \\
+                          -e ZAP_PASS="${ZAP_PASS}" \\
+                          ${ZAP_IMAGE} \\
+                          zap.sh -daemon -host 0.0.0.0 -port 8080 \\
+                          -config api.disablekey=true \\
+                          -configfile /zap/wrk/configs/zap.conf
+                    """
                     
-                    // Load scripts via ZAP-CLI
+                    // Wait for initialization
+                    sleep 30
+                    
+                    // Load scripts
                     sh '''
-                        docker exec zap-scan zap-cli scripts enable \
+                        docker exec zap-scan zap-cli scripts load \
                             /zap/wrk/scripts/authentication/unilever-auth.js \
-                            --type=authentication
-                        docker exec zap-scan zap-cli scripts enable \
+                            --type=authentication --name=unilever-auth
+                        docker exec zap-scan zap-cli scripts load \
                             /zap/wrk/scripts/session/unilever-session.js \
-                            --type=session
+                            --type=session --name=unilever-session
                     '''
                     
-                    // Run the scan
-                    sh '''
-                        docker exec zap-scan zap-cli active-scan \
-                            --scanner all --recursive \
-                            --context "Default Context" \
+                    // Run scan
+                    sh """
+                        docker exec zap-scan zap-cli active-scan \\
+                            --scanner all \\
+                            --recursive \\
                             ${ZAP_URL}
-                    '''
+                    """
                     
                     // Generate reports
                     sh '''
-                        docker exec zap-scan zap-cli report -o /zap/wrk/report.html -f html
-                        docker exec zap-scan zap-cli report -o /zap/wrk/report.xml -f xml
+                        docker exec zap-scan zap-cli report -o /zap/wrk/zap-reports/report.html -f html
+                        docker exec zap-scan zap-cli report -o /zap/wrk/zap-reports/report.xml -f xml
                     '''
                 }
             }
@@ -71,7 +87,7 @@ pipeline {
             sh '''
                 docker stop zap-scan || true
                 docker rm zap-scan || true
-                sudo chown -R jenkins:jenkins ${WORKSPACE}  # Fix permissions
+                sudo chown -R jenkins:jenkins ${WORKSPACE} || true
             '''
             archiveArtifacts artifacts: 'zap-reports/*.html,zap-reports/*.xml', allowEmptyArchive: true
         }
