@@ -1,28 +1,66 @@
 pipeline {
-    agent any  // This defines the default agent for all stages
-
+    agent any
+    
     environment {
-        ZAP_URL = "https://dcodept.unilever.com"
-        ZAP_AUTH_URL = "https://dcodept.unilever.com/sso-dev/login"
-        ZAP_USER = credentials('zap-username')
-        ZAP_PASS = credentials('zap-password')
-        ZAP_DIR = "${WORKSPACE}/zap-reports"
+        ZAP_IMAGE = 'owasp/zap2docker-stable'  // Official ZAP image
+        ZAP_URL = 'https://dcodept.unilever.com'
+        ZAP_AUTH_URL = 'https://dcodept.unilever.com/sso-dev/login'
+        WORKSPACE_DIR = "${WORKSPACE}/zap-reports"
     }
-
+    
     stages {
-        stage('Setup') {
+        stage('Prepare Environment') {
             steps {
-                sh 'mkdir -p ${ZAP_DIR}'
-                sh 'wget -O zap.conf https://github.com/sunidhiagrawal18/zap/blob/main/configs/zap.conf'
+                sh '''
+                    mkdir -p ${WORKSPACE_DIR}
+                    chmod -R 777 ${WORKSPACE} || true  # Fix permission issues
+                '''
             }
         }
 
-        stage('ZAP Scan') {
+        stage('Run Authenticated ZAP Scan') {
             steps {
                 script {
-                    sh 'docker run -u zap -d --name zap -p 8080:8080 -i owasp/zap2docker-stable zap.sh -daemon -host 0.0.0.0 -port 8080 -config api.disablekey=true'
+                    // Start ZAP in daemon mode with your configs
+                    sh '''
+                        docker rm -f zap-scan || true  # Cleanup old instances
+                        docker run -d --name zap-scan \
+                          -v ${WORKSPACE}:/zap/wrk:rw \
+                          -p 8080:8080 \
+                          -e ZAP_USER="${ZAP_USER}" \
+                          -e ZAP_PASS="${ZAP_PASS}" \
+                          ${ZAP_IMAGE} \
+                          zap.sh -daemon -host 0.0.0.0 -port 8080 \
+                          -config api.disablekey=true \
+                          -configfile /zap/wrk/zap.conf
+                    '''
+                    
+                    // Wait for ZAP to initialize
                     sh 'sleep 30'
-                    // ... rest of scan steps ...
+                    
+                    // Load scripts via ZAP-CLI
+                    sh '''
+                        docker exec zap-scan zap-cli scripts enable \
+                            /zap/wrk/scripts/authentication/unilever-auth.js \
+                            --type=authentication
+                        docker exec zap-scan zap-cli scripts enable \
+                            /zap/wrk/scripts/session/unilever-session.js \
+                            --type=session
+                    '''
+                    
+                    // Run the scan
+                    sh '''
+                        docker exec zap-scan zap-cli active-scan \
+                            --scanner all --recursive \
+                            --context "Default Context" \
+                            ${ZAP_URL}
+                    '''
+                    
+                    // Generate reports
+                    sh '''
+                        docker exec zap-scan zap-cli report -o /zap/wrk/report.html -f html
+                        docker exec zap-scan zap-cli report -o /zap/wrk/report.xml -f xml
+                    '''
                 }
             }
         }
@@ -30,11 +68,12 @@ pipeline {
 
     post {
         always {
-            node('') {  // ✅ Empty string = use any available agent
-                sh 'docker stop zap || true'
-                sh 'docker rm zap || true'
-                archiveArtifacts artifacts: 'zap-reports/**'
-            }
+            sh '''
+                docker stop zap-scan || true
+                docker rm zap-scan || true
+                sudo chown -R jenkins:jenkins ${WORKSPACE}  # Fix permissions
+            '''
+            archiveArtifacts artifacts: 'zap-reports/*.html,zap-reports/*.xml', allowEmptyArchive: true
         }
     }
 }
