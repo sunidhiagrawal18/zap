@@ -1,12 +1,14 @@
 pipeline {
-    agent any
+    agent any  // This defines the default agent for all stages
+
     environment {
         ZAP_URL = "https://dcodept.unilever.com"
         ZAP_AUTH_URL = "https://dcodept.unilever.com/sso-dev/login"
-        ZAP_USER = credentials('zap-username')  // From Jenkins secrets
-        ZAP_PASS = credentials('zap-password')  // From Jenkins secrets
+        ZAP_USER = credentials('zap-username')
+        ZAP_PASS = credentials('zap-password')
         ZAP_DIR = "${WORKSPACE}/zap-reports"
     }
+
     stages {
         stage('Setup') {
             steps {
@@ -14,6 +16,7 @@ pipeline {
                 sh 'wget -O zap.conf https://github.com/sunidhiagrawal18/zap/blob/main/configs/zap.conf'
             }
         }
+
         stage('ZAP Scan') {
             steps {
                 script {
@@ -24,9 +27,10 @@ pipeline {
             }
         }
     }
+
     post {
         always {
-            node {  // ✅ Fixes "MissingContextVariableException"
+            node('') {  // ✅ Empty string = use any available agent
                 sh 'docker stop zap || true'
                 sh 'docker rm zap || true'
                 archiveArtifacts artifacts: 'zap-reports/**'
